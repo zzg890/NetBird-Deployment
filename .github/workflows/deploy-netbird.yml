@@ -43,7 +43,8 @@ jobs:
 
       - name: Publish Cloudflare DNS record
         run: |
-          api() { curl -fsS -H "Authorization: ******" -H "Content-Type: application/json" "$@"; }
+          AUTH_SCHEME="Bearer"
+          api() { curl -fsS -H "Authorization: $AUTH_SCHEME $CF_TOKEN" -H "Content-Type: application/json" "$@"; }
           ZONE_NAME="$(echo "$DOMAIN" | awk -F. '{print $(NF-1)"."$NF}')"
           ZONE_ID="$(api "https://api.cloudflare.com/client/v4/zones?name=$ZONE_NAME" | jq -r '.result[0].id')"
           [ -n "$ZONE_ID" ] && [ "$ZONE_ID" != null ] || { echo "Zone not found"; exit 1; }
