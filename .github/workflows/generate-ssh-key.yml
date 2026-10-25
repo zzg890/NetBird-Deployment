@@ -1,0 +1,36 @@
+name: Generate SSH Key
+
+# Standalone workflow: creates an SSH key pair, stores the private key as the
+# repository secret SSH_PRIVATE_KEY and the public key as the repository
+# variable SSH_PUBLIC_KEY.
+# Requires a secret ADMIN_TOKEN (PAT with repo admin / "Secrets" and "Variables"
+# write permission), because GITHUB_TOKEN cannot write secrets or variables.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Generate key pair
+        run: |
+          ssh-keygen -t ed25519 -N "" -C "github-actions-netbird" -f "$RUNNER_TEMP/deploy_key"
+
+      - name: Save private key as secret and public key as variable
+        run: |
+          gh secret set SSH_PRIVATE_KEY < "$RUNNER_TEMP/deploy_key"
+          gh variable set SSH_PUBLIC_KEY < "$RUNNER_TEMP/deploy_key.pub"
+
+      - name: Show public key and cleanup
+        if: always()
+        run: |
+          cat "$RUNNER_TEMP/deploy_key.pub" || true
+          echo "Add this public key to ~/.ssh/authorized_keys on the server."
+          rm -f "$RUNNER_TEMP/deploy_key" "$RUNNER_TEMP/deploy_key.pub"
