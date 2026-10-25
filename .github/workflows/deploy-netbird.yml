@@ -1,10 +1,10 @@
 name: Deploy NetBird
 
-# Required secrets:  SSH_PRIVATE_KEY, NETBIRD_SETUP_KEY, CLOUDFLARE_API_TOKEN
+# Required secrets:  SSH_PRIVATE_KEY, CLOUDFLARE_API_TOKEN
 #                    (token needs Zone:DNS:Edit and Zone:Zone:Read)
-# Required variables: DOMAIN (e.g. netbird.example.com)
-# Optional variables: SSH_USER (default root), NETBIRD_UPSTREAM_PORT (default 8080),
-#                     NETBIRD_MANAGEMENT_URL (default NetBird cloud)
+# Required variables: DOMAIN (e.g. netbird.example.com),
+#                     NETBIRD_LETSENCRYPT_EMAIL
+# Optional variables: SSH_USER (default root)
 
 on:
   workflow_dispatch:
@@ -24,16 +24,14 @@ jobs:
       SERVER_IP: ${{ inputs.server_ip }}
       SSH_USER: ${{ vars.SSH_USER || 'root' }}
       DOMAIN: ${{ vars.DOMAIN }}
-      UPSTREAM_PORT: ${{ vars.NETBIRD_UPSTREAM_PORT || '8080' }}
-      MANAGEMENT_URL: ${{ vars.NETBIRD_MANAGEMENT_URL }}
-      SETUP_KEY: ${{ secrets.NETBIRD_SETUP_KEY }}
+      LE_EMAIL: ${{ vars.NETBIRD_LETSENCRYPT_EMAIL }}
       CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
     steps:
       - name: Validate inputs
         run: |
           [ -n "$DOMAIN" ] || { echo "Variable DOMAIN is required"; exit 1; }
-          [[ "$DOMAIN" =~ ^[A-Za-z0-9.-]+$ ]] || { echo "Invalid DOMAIN"; exit 1; }
-          [[ "$UPSTREAM_PORT" =~ ^[0-9]+$ ]] || { echo "Invalid port"; exit 1; }
+          [[ "$DOMAIN" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$ ]] || { echo "Invalid DOMAIN"; exit 1; }
+          [ -n "$LE_EMAIL" ] || { echo "Variable NETBIRD_LETSENCRYPT_EMAIL is required"; exit 1; }
           [[ "$SERVER_IP" =~ ^[0-9.]+$ ]] || { echo "Invalid server IP"; exit 1; }
 
       - name: Set up SSH
@@ -43,63 +41,49 @@ jobs:
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -H "$SERVER_IP" >> ~/.ssh/known_hosts
 
-      - name: Install and configure NetBird
+      - name: Publish Cloudflare DNS record
         run: |
-          ssh -i ~/.ssh/id_ed25519 "$SSH_USER@$SERVER_IP" \
-            "SETUP_KEY='$SETUP_KEY' MANAGEMENT_URL='$MANAGEMENT_URL' bash -s" <<'REMOTE'
-          set -euo pipefail
-          SUDO=""; [ "$(id -u)" -eq 0 ] || SUDO="sudo"
-          if ! command -v netbird >/dev/null; then
-            curl -fsSL https://pkgs.netbird.io/install.sh | $SUDO sh
-          fi
-          ARGS=(up --setup-key "$SETUP_KEY")
-          [ -z "$MANAGEMENT_URL" ] || ARGS+=(--management-url "$MANAGEMENT_URL")
-          $SUDO netbird service install 2>/dev/null || true
-          $SUDO netbird service start 2>/dev/null || true
-          $SUDO netbird "${ARGS[@]}"
-          $SUDO netbird status
-          REMOTE
-
-      - name: Create nginx domain reverse proxy config
-        run: |
-          ssh -i ~/.ssh/id_ed25519 "$SSH_USER@$SERVER_IP" \
-            "DOMAIN='$DOMAIN' PORT='$UPSTREAM_PORT' bash -s" <<'REMOTE'
-          set -euo pipefail
-          SUDO=""; [ "$(id -u)" -eq 0 ] || SUDO="sudo"
-          $SUDO tee "/etc/nginx/conf.d/$DOMAIN.conf" >/dev/null <<CONF
-          server {
-              listen 80;
-              server_name $DOMAIN;
-
-              location / {
-                  proxy_pass http://127.0.0.1:$PORT;
-                  proxy_http_version 1.1;
-                  proxy_set_header Host \$host;
-                  proxy_set_header X-Real-IP \$remote_addr;
-                  proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-                  proxy_set_header X-Forwarded-Proto \$scheme;
-                  proxy_set_header Upgrade \$http_upgrade;
-                  proxy_set_header Connection "upgrade";
-              }
-          }
-          CONF
-          $SUDO nginx -t
-          $SUDO systemctl reload nginx
-          REMOTE
-
-      - name: Enable Cloudflare proxy (orange cloud)
-        run: |
-          api() { curl -fsS -H "Authorization: Bearer $CF_TOKEN" -H "Content-Type: application/json" "$@"; }
+          AUTH_SCHEME="Bearer"
+          api() { curl -fsS -H "Authorization: $AUTH_SCHEME $CF_TOKEN" -H "Content-Type: application/json" "$@"; }
           ZONE_NAME="$(echo "$DOMAIN" | awk -F. '{print $(NF-1)"."$NF}')"
           ZONE_ID="$(api "https://api.cloudflare.com/client/v4/zones?name=$ZONE_NAME" | jq -r '.result[0].id')"
           [ -n "$ZONE_ID" ] && [ "$ZONE_ID" != null ] || { echo "Zone not found"; exit 1; }
           BODY="$(jq -n --arg n "$DOMAIN" --arg c "$SERVER_IP" '{type:"A",name:$n,content:$c,proxied:true,ttl:1}')"
           REC_ID="$(api "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records?type=A&name=$DOMAIN" | jq -r '.result[0].id // empty')"
           if [ -n "$REC_ID" ]; then
-            api -X PUT "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records/$REC_ID" -d "$BODY" | jq '.success'
+            api -X PUT "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records/$REC_ID" -d "$BODY" | jq -e '.success'
           else
-            api -X POST "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records" -d "$BODY" | jq '.success'
+            api -X POST "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records" -d "$BODY" | jq -e '.success'
           fi
+
+      - name: Install self-hosted NetBird server
+        run: |
+          printf -v REMOTE_ENV 'DOMAIN=%q LE_EMAIL=%q' "$DOMAIN" "$LE_EMAIL"
+          ssh -i ~/.ssh/id_ed25519 "$SSH_USER@$SERVER_IP" \
+            "$REMOTE_ENV bash -s" <<'REMOTE'
+          set -euo pipefail
+          SUDO=""; [ "$(id -u)" -eq 0 ] || SUDO="sudo"
+          $SUDO apt-get update
+          $SUDO apt-get install -y ca-certificates curl jq
+          if ! command -v docker >/dev/null || ! docker compose version >/dev/null 2>&1; then
+            curl -fsSL https://get.docker.com | $SUDO sh
+          fi
+          $SUDO systemctl enable --now docker
+          $SUDO mkdir -p /opt/netbird
+          cd /opt/netbird
+          if [ ! -f config.yaml ]; then
+            curl -fsSL https://github.com/netbirdio/netbird/releases/latest/download/getting-started.sh |
+              $SUDO env NETBIRD_DOMAIN="$DOMAIN" \
+                NETBIRD_LETSENCRYPT_EMAIL="$LE_EMAIL" \
+                NETBIRD_REVERSE_PROXY_TYPE=0 \
+                NETBIRD_ENABLE_PROXY=false \
+                NETBIRD_NON_INTERACTIVE=true bash
+          else
+            $SUDO docker compose pull
+            $SUDO docker compose up -d
+          fi
+          $SUDO docker compose ps
+          REMOTE
 
       - name: Cleanup
         if: always()
