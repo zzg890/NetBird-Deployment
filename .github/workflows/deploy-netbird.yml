@@ -1,10 +1,10 @@
 name: Deploy NetBird
 
-# Required secrets:  SSH_PRIVATE_KEY, NETBIRD_SETUP_KEY, CLOUDFLARE_API_TOKEN
+# Required secrets:  SSH_PRIVATE_KEY, CLOUDFLARE_API_TOKEN
 #                    (token needs Zone:DNS:Edit and Zone:Zone:Read)
-# Required variables: DOMAIN (e.g. netbird.example.com)
-# Optional variables: SSH_USER (default root), NETBIRD_UPSTREAM_PORT (default 8080),
-#                     NETBIRD_MANAGEMENT_URL (default NetBird cloud)
+# Required variables: DOMAIN (e.g. netbird.example.com),
+#                     NETBIRD_LETSENCRYPT_EMAIL
+# Optional variables: SSH_USER (default root)
 
 on:
   workflow_dispatch:
@@ -24,16 +24,14 @@ jobs:
       SERVER_IP: ${{ inputs.server_ip }}
       SSH_USER: ${{ vars.SSH_USER || 'root' }}
       DOMAIN: ${{ vars.DOMAIN }}
-      UPSTREAM_PORT: ${{ vars.NETBIRD_UPSTREAM_PORT || '8080' }}
-      MANAGEMENT_URL: ${{ vars.NETBIRD_MANAGEMENT_URL }}
-      SETUP_KEY: ${{ secrets.NETBIRD_SETUP_KEY }}
+      LE_EMAIL: ${{ vars.NETBIRD_LETSENCRYPT_EMAIL }}
       CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
     steps:
       - name: Validate inputs
         run: |
           [ -n "$DOMAIN" ] || { echo "Variable DOMAIN is required"; exit 1; }
-          [[ "$DOMAIN" =~ ^[A-Za-z0-9.-]+$ ]] || { echo "Invalid DOMAIN"; exit 1; }
-          [[ "$UPSTREAM_PORT" =~ ^[0-9]+$ ]] || { echo "Invalid port"; exit 1; }
+          [[ "$DOMAIN" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$ ]] || { echo "Invalid DOMAIN"; exit 1; }
+          [ -n "$LE_EMAIL" ] || { echo "Variable NETBIRD_LETSENCRYPT_EMAIL is required"; exit 1; }
           [[ "$SERVER_IP" =~ ^[0-9.]+$ ]] || { echo "Invalid server IP"; exit 1; }
 
       - name: Set up SSH
