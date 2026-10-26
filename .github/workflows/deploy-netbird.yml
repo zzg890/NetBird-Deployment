@@ -47,7 +47,7 @@ jobs:
           ssh-keygen -y -f "$KEY_TMP" >/dev/null 2>&1 \
             || { echo "SSH_PRIVATE_KEY is not a valid (unencrypted) private key"; exit 1; }
 
-          VERIFY="$(curl -fsS -H "Authorization: ******" \
+          VERIFY="$(curl -fsS -H "Authorization: Bearer $CF_TOKEN" \
             https://api.cloudflare.com/client/v4/user/tokens/verify)" \
             || { echo "Cloudflare token verification request failed"; exit 1; }
           [ "$(echo "$VERIFY" | jq -r '.result.status')" = "active" ] \
